@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Telemetry Log Search & Visualization</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --border: #262a36;
+    --text: #e6e8ee; --muted: #8b93a7; --accent: #5b8cff;
+    --error: #ef5b5b; --warn: #eab54e; --info: #5b8cff; --debug: #7d8597;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding: 20px 28px; border-bottom: 1px solid var(--border); }
+  header h1 { margin:0; font-size: 18px; font-weight: 600; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 20px 28px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .filters { display:flex; gap:8px; flex-wrap: wrap; padding: 0 28px 16px; }
+  .filters input, .filters select { background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+  .filters input[type=text] { flex: 1; min-width: 200px; }
+  .filters button { background: var(--accent); border: none; color: white; padding: 8px 16px;
+    border-radius: 6px; font-size: 13px; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top:0; background: var(--panel); }
+  .level { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .level.ERROR { background: rgba(239,91,91,.15); color: var(--error); }
+  .level.WARN { background: rgba(234,181,78,.15); color: var(--warn); }
+  .level.INFO { background: rgba(91,140,255,.15); color: var(--info); }
+  .level.DEBUG { background: rgba(125,133,151,.15); color: var(--debug); }
+  .results-panel { grid-column: 1 / -1; max-height: 420px; overflow: auto; }
+  .meta { color: var(--muted); font-size: 12px; padding: 0 28px 8px; }
+  .charts-row { grid-column: 1 / -1; display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Telemetry Log Search & Visualization Platform</h1>
+  <p>Search across ingested logs and monitor volume, error rate, and source breakdown.</p>
+</header>
+
+<div class="filters">
+  <input type="text" id="q" placeholder="Search message text (e.g. timeout, failed)">
+  <select id="level">
+    <option value="">All levels</option>
+    <option>INFO</option><option>WARN</option><option>ERROR</option><option>DEBUG</option>
+  </select>
+  <input type="text" id="source" placeholder="Source (e.g. auth-service)">
+  <button onclick="runSearch(); refreshStats();">Search</button>
+</div>
+
+<div class="layout">
+  <div class="charts-row">
+    <div class="panel">
+      <h2>Log Volume Over Time</h2>
+      <canvas id="volumeChart" height="90"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Level Breakdown</h2>
+      <canvas id="levelChart" height="90"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Top Sources</h2>
+      <canvas id="sourceChart" height="90"></canvas>
+    </div>
+  </div>
+
+  <div class="panel results-panel">
+    <h2>Results</h2>
+    <div class="meta" id="resultMeta">No search run yet.</div>
+    <table>
+      <thead><tr><th>Timestamp</th><th>Level</th><th>Source</th><th>Host</th><th>Message</th></tr></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = ""; // same origin, since FastAPI serves this file
+
+let volumeChart, levelChart, sourceChart;
+const LEVEL_COLORS = { ERROR: "#ef5b5b", WARN: "#eab54e", INFO: "#5b8cff", DEBUG: "#7d8597" };
+
+function fmtTs(ts) {
+  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+
+async function runSearch() {
+  const q = document.getElementById("q").value.trim();
+  const level = document.getElementById("level").value;
+  const source = document.getElementById("source").value.trim();
+
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (level) params.set("level", level);
+  if (source) params.set("source", source);
+  params.set("page_size", "100");
+
+  const res = await fetch(`${API}/api/logs/search?${params.toString()}`);
+  const data = await res.json();
+
+  document.getElementById("resultMeta").textContent = `${data.total} results`;
+  const body = document.getElementById("resultsBody");
+  body.innerHTML = "";
+  for (const row of data.results) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${fmtTs(row.timestamp)}</td>
+      <td><span class="level ${row.level}">${row.level}</span></td>
+      <td>${row.source}</td>
+      <td>${row.host || ""}</td>
+      <td>${row.message}</td>`;
+    body.appendChild(tr);
+  }
+}
+
+async function refreshStats() {
+  const [volume, levels, sources] = await Promise.all([
+    fetch(`${API}/api/stats/volume?bucket=hour`).then(r => r.json()),
+    fetch(`${API}/api/stats/levels`).then(r => r.json()),
+    fetch(`${API}/api/stats/sources?limit=8`).then(r => r.json()),
+  ]);
+
+  const vLabels = volume.map(v => v.bucket);
+  const vData = volume.map(v => v.count);
+  if (volumeChart) volumeChart.destroy();
+  volumeChart = new Chart(document.getElementById("volumeChart"), {
+    type: "line",
+    data: { labels: vLabels, datasets: [{ label: "Logs", data: vData, borderColor: "#5b8cff",
+      backgroundColor: "rgba(91,140,255,.15)", fill: true, tension: 0.3, pointRadius: 0 }] },
+    options: { plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: "#8b93a7", maxTicksLimit: 8 }, grid: { color: "#262a36" } },
+                y: { ticks: { color: "#8b93a7" }, grid: { color: "#262a36" } } } }
+  });
+
+  const lLabels = levels.map(l => l.level);
+  const lData = levels.map(l => l.count);
+  const lColors = lLabels.map(l => LEVEL_COLORS[l] || "#8b93a7");
+  if (levelChart) levelChart.destroy();
+  levelChart = new Chart(document.getElementById("levelChart"), {
+    type: "doughnut",
+    data: { labels: lLabels, datasets: [{ data: lData, backgroundColor: lColors, borderWidth: 0 }] },
+    options: { plugins: { legend: { position: "bottom", labels: { color: "#8b93a7", boxWidth: 10 } } } }
+  });
+
+  const sLabels = sources.map(s => s.source);
+  const sData = sources.map(s => s.count);
+  if (sourceChart) sourceChart.destroy();
+  sourceChart = new Chart(document.getElementById("sourceChart"), {
+    type: "bar",
+    data: { labels: sLabels, datasets: [{ data: sData, backgroundColor: "#5b8cff" }] },
+    options: { indexAxis: "y", plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: "#8b93a7" }, grid: { color: "#262a36" } },
+                y: { ticks: { color: "#8b93a7" }, grid: { display: false } } } }
+  });
+}
+
+runSearch();
+refreshStats();
+</script>
+</body>
+</html>
