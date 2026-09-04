@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
 
 import database
 from models import LogEntry, LogBatch
+from security import require_api_key, rate_limit
 
 app = FastAPI(title="Telemetry Log Search & Visualization Platform")
 
@@ -21,18 +22,19 @@ def startup():
     database.init_db()
 
 
-@app.post("/api/logs/ingest")
+@app.post("/api/logs/ingest", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def ingest_log(entry: LogEntry):
     log_id = database.insert_log(entry)
     return {"status": "ok", "id": log_id}
 
 
-@app.post("/api/logs/ingest/batch")
+@app.post("/api/logs/ingest/batch", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def ingest_batch(batch: LogBatch):
     if not batch.logs:
         raise HTTPException(status_code=400, detail="No logs provided")
     count = database.insert_logs_batch(batch.logs)
     return {"status": "ok", "ingested": count}
+
 
 
 @app.get("/api/logs/search")
