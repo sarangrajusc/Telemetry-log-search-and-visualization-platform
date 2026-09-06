@@ -6,6 +6,7 @@ from typing import Optional
 import database
 from models import LogEntry, LogBatch
 from security import require_api_key, rate_limit
+from retention import purge_old_logs
 
 app = FastAPI(title="Telemetry Log Search & Visualization Platform")
 
@@ -35,6 +36,11 @@ def ingest_batch(batch: LogBatch):
     count = database.insert_logs_batch(batch.logs)
     return {"status": "ok", "ingested": count}
 
+
+@app.post("/api/admin/retention", dependencies=[Depends(require_api_key)])
+def run_retention(days: int = Query(30, ge=1, description="Delete logs older than this many days")):
+    deleted = purge_old_logs(days)
+    return {"status": "ok", "deleted": deleted}
 
 
 @app.get("/api/logs/search")
