@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  telemetry-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - API_KEY=${API_KEY:-}
+      - RATE_LIMIT_REQUESTS=100
+      - RATE_LIMIT_WINDOW_SECONDS=60
+    volumes:
+      - telemetry-data:/app/backend/data
+
+volumes:
+  telemetry-data:
