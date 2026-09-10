@@ -129,11 +129,6 @@ shell before running to enable auth in the container.
 4. Deploy to a public host (Render/Fly.io) for a live demo link.
 5. Move rate limiting to a shared store (Redis) before running multiple workers.
 
-## Notes for your OPT project write-up
-
-Good things to highlight: the pluggable storage layer, FTS5 full-text indexing choice and its
-trade-offs vs. a dedicated search engine, batch ingestion design, and how the dashboard queries
-map directly onto indexed columns (timestamp, level, source) for performance.
 
 ## License
 
