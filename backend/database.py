@@ -4,11 +4,10 @@ import os
 from datetime import datetime
 from contextlib import contextmanager
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "telemetry.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "telemetry.db"))
 
 
 def init_db():
-    """Create the logs table and FTS5 virtual table if they don't exist."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -24,14 +23,12 @@ def init_db():
         )
     """)
 
-    # FTS5 virtual table indexed over the message + source, linked via rowid
     cur.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
             message, source, content='logs', content_rowid='id'
         )
     """)
 
-    # Keep FTS index in sync with the logs table
     cur.execute("""
         CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
             INSERT INTO logs_fts(rowid, message, source) VALUES (new.id, new.message, new.source);
@@ -135,7 +132,6 @@ def search_logs(query: str = None, level: str = None, source: str = None,
 
 
 def volume_over_time(bucket: str = "hour", start: str = None, end: str = None):
-    """Bucket log counts by minute/hour/day for charting."""
     fmt = {"minute": "%Y-%m-%dT%H:%M", "hour": "%Y-%m-%dT%H", "day": "%Y-%m-%d"}.get(bucket, "%Y-%m-%dT%H")
     where = []
     params = []
@@ -169,3 +165,15 @@ def top_sources(limit: int = 10):
             (limit,),
         ).fetchall()
     return [{"source": r["source"], "count": r["count"]} for r in rows]
+
+
+def recent_level_counts(minutes: int = 15):
+    """Counts per level within the last N minutes — used by the alerting check."""
+    from datetime import timedelta
+    cutoff_iso = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT level, COUNT(*) as count FROM logs WHERE timestamp >= ? GROUP BY level",
+            (cutoff_iso,),
+        ).fetchall()
+    return {r["level"]: r["count"] for r in rows}
