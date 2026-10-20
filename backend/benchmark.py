@@ -1,72 +1,106 @@
 """
-Benchmarks ingestion and search performance against the current SQLite + FTS5
-storage layer, at a configurable volume. Gives concrete numbers to back the
-"when would this need a dedicated search engine" discussion in the README,
-instead of leaving it as a theoretical tradeoff.
+Benchmarks ingestion, search, dashboard aggregates and incident investigation against
+the current storage backend at a configurable volume.
+
+It measures, rather than assumes:
+  * ingestion throughput (includes request validation and secret redaction)
+  * full-text / filtered search latency
+  * dashboard aggregate latency
+  * incident investigation: sequential vs. concurrent fan-out vs. warm cache
 
 Usage:
-    python benchmark.py --rows 100000
+    python benchmark.py --rows 500000
 """
 import argparse
-import random
-import time
 import os
+import random
+import statistics
 import tempfile
+import time
+from datetime import datetime, timedelta
 
 os.environ["TESTING"] = "1"
 
 
-def run_benchmark(rows: int):
+def median_ms(fn, runs):
+    times = []
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        fn()
+        times.append((time.perf_counter() - t0) * 1000)
+    return statistics.median(times)
+
+
+def run_benchmark(rows: int, seed: int = 7):
     db_fd, db_path = tempfile.mkstemp(suffix=".db")
     os.environ["DB_PATH"] = db_path
 
+    import cache
     import database
+    import investigate
+    import storage
+
     database.DB_PATH = db_path
-    database.init_db()
+    storage.set_backend(None)
+    storage.init_db()
 
     from models import LogEntry
 
-    sources = ["auth-service", "payments-api", "order-worker", "search-index", "gateway"]
-    levels = ["INFO", "INFO", "WARN", "ERROR", "DEBUG"]
-    words = ["timeout", "retrying", "completed", "failed", "cache", "query", "connection", "token"]
+    rnd = random.Random(seed)
+    sources = ["auth-service", "payments-api", "order-worker", "search-index", "gateway", "notifications"]
+    levels = ["INFO"] * 8 + ["WARN"] * 3 + ["ERROR"] * 2 + ["DEBUG"]
+    templates = [
+        "Request {n} completed in {m}ms",
+        "Connection timeout to db-{m} after {n}ms",
+        "Retrying failed request attempt {m} for order {n}",
+        "Cache miss for key {n}",
+        "User {n} authentication succeeded",
+        "Invalid token for user {n}",
+        "Worker picked up job {n}",
+        "Rate limit exceeded for client 10.0.{m}.{k}",
+    ]
+    now = datetime.utcnow()
 
-    print(f"Benchmarking with {rows:,} rows...")
+    print(f"Benchmarking with {rows:,} rows (backend: {storage.get_backend().__name__})")
 
-    # --- Ingestion ---
-    entries = []
-    for i in range(rows):
-        msg = f"{random.choice(words)} event {i} {random.choice(words)}"
-        entries.append(LogEntry(source=random.choice(sources), level=random.choice(levels), message=msg))
+    # --- Ingestion (validation + redaction + insert), in batches of 1000 ---
+    t0 = time.perf_counter()
+    batch, done = [], 0
+    for _ in range(rows):
+        msg = rnd.choice(templates).format(n=rnd.randint(1, 99999), m=rnd.randint(1, 250), k=rnd.randint(1, 250))
+        ts = now - timedelta(seconds=rnd.randint(0, 24 * 3600))
+        batch.append(LogEntry(source=rnd.choice(sources), level=rnd.choice(levels), message=msg, timestamp=ts))
+        if len(batch) == 1000:
+            storage.insert_logs_batch(batch)
+            done += len(batch)
+            batch = []
+    if batch:
+        storage.insert_logs_batch(batch)
+        done += len(batch)
+    ingest_time = time.perf_counter() - t0
+    print(f"Ingestion (validate+redact+insert): {done:,} rows in {ingest_time:.1f}s "
+          f"({done / ingest_time:,.0f} rows/sec)")
 
-    start = time.perf_counter()
-    batch_size = 1000
-    for i in range(0, len(entries), batch_size):
-        database.insert_logs_batch(entries[i:i + batch_size])
-    ingest_time = time.perf_counter() - start
-    print(f"Ingestion: {rows:,} rows in {ingest_time:.2f}s ({rows / ingest_time:,.0f} rows/sec)")
+    words = ["timeout", "retrying", "completed", "token", "cache", "worker", "authentication"]
+    print(f"Full-text search (top 50):      {median_ms(lambda: storage.search_logs(query=rnd.choice(words), page_size=50), 30):8.1f} ms median")
+    print(f"Filtered search (level+source): {median_ms(lambda: storage.search_logs(level='ERROR', source=rnd.choice(sources), page_size=50), 30):8.1f} ms median")
+    print(f"Dashboard stats (3 aggregates): {median_ms(lambda: (storage.volume_over_time(bucket='hour'), storage.level_breakdown(), storage.top_sources()), 5):8.1f} ms median")
 
-    # --- Full-text search ---
-    start = time.perf_counter()
-    for _ in range(50):
-        database.search_logs(query=random.choice(words), page_size=50)
-    fts_time = (time.perf_counter() - start) / 50
-    print(f"Full-text search: {fts_time * 1000:.2f}ms avg over 50 queries")
+    # --- Incident investigation: 24h window over the whole table ---
+    window = 24 * 60
+    q = "why is payments-api timeout failing?"
+    fixed_now = datetime.utcnow()
 
-    # --- Filtered search (level + source, no text query) ---
-    start = time.perf_counter()
-    for _ in range(50):
-        database.search_logs(level=random.choice(levels), source=random.choice(sources), page_size=50)
-    filter_time = (time.perf_counter() - start) / 50
-    print(f"Filtered search (level+source): {filter_time * 1000:.2f}ms avg over 50 queries")
+    seq = median_ms(lambda: investigate.investigate(q, window, parallel=False, use_cache=False, now=fixed_now), 5)
+    par = median_ms(lambda: investigate.investigate(q, window, parallel=True, use_cache=False, now=fixed_now), 5)
+    investigate.investigate(q, window, now=fixed_now)  # warm the cache
+    warm = median_ms(lambda: investigate.investigate(q, window, now=fixed_now), 20)
 
-    # --- Aggregation (stats) ---
-    start = time.perf_counter()
-    for _ in range(20):
-        database.volume_over_time(bucket="hour")
-        database.level_breakdown()
-        database.top_sources()
-    agg_time = (time.perf_counter() - start) / 20
-    print(f"Dashboard stats (3 aggregate queries): {agg_time * 1000:.2f}ms avg over 20 runs")
+    print("\nIncident investigation (24h window, 5 sub-queries):")
+    print(f"  sequential, cold cache : {seq:8.1f} ms")
+    print(f"  concurrent, cold cache : {par:8.1f} ms  ({seq / par:.2f}x vs sequential)")
+    print(f"  concurrent, warm cache : {warm:8.2f} ms  ({seq / warm:,.0f}x vs sequential)")
+    print(f"  cache stats            : {cache.query_cache.stats()}")
 
     os.close(db_fd)
     os.remove(db_path)
@@ -75,5 +109,6 @@ def run_benchmark(rows: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=50000)
+    parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
-    run_benchmark(args.rows)
+    run_benchmark(args.rows, args.seed)

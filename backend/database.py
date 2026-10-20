@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import re
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -46,6 +47,19 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def fts_safe_query(text: str, operator: str = None) -> str:
+    """Turn free text into a valid FTS5 query of quoted word tokens.
+
+    Bare AND/OR/NOT keywords are dropped as tokens; if the text contained an explicit
+    uppercase OR the terms are joined with OR, otherwise with AND (unless `operator` is given).
+    """
+    text = text or ""
+    if operator is None:
+        operator = "OR" if re.search(r"\bOR\b", text) else "AND"
+    tokens = [t for t in re.findall(r"\w+", text) if t not in ("AND", "OR", "NOT")]
+    return f" {operator} ".join(f'"{t}"' for t in tokens)
 
 
 @contextmanager
@@ -113,13 +127,28 @@ def search_logs(query: str = None, level: str = None, source: str = None,
 
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
 
-    with get_conn() as conn:
-        total = conn.execute(f"SELECT COUNT(*) {base} {where_clause}", params).fetchone()[0]
-        rows = conn.execute(
-            f"SELECT l.id, l.timestamp, l.source, l.host, l.level, l.message, l.tags "
-            f"{base} {where_clause} ORDER BY l.timestamp DESC LIMIT ? OFFSET ?",
-            params + [page_size, offset],
-        ).fetchall()
+    def run(p):
+        with get_conn() as conn:
+            total = conn.execute(f"SELECT COUNT(*) {base} {where_clause}", p).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT l.id, l.timestamp, l.source, l.host, l.level, l.message, l.tags "
+                f"{base} {where_clause} ORDER BY l.timestamp DESC LIMIT ? OFFSET ?",
+                p + [page_size, offset],
+            ).fetchall()
+        return total, rows
+
+    try:
+        total, rows = run(params)
+    except sqlite3.OperationalError:
+        if not query:
+            raise
+        # The raw string wasn't valid FTS5 syntax (e.g. "auth-service" or an unbalanced
+        # quote). Fall back to a literal match on its word tokens instead of a 500.
+        safe = fts_safe_query(query)
+        if not safe:
+            return 0, []
+        params[0] = safe
+        total, rows = run(params)
 
     results = []
     for r in rows:

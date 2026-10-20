@@ -13,7 +13,7 @@ instead (e.g. counting errors as they're ingested rather than re-querying).
 """
 import os
 import requests
-from database import recent_level_counts
+from storage import recent_level_counts
 
 ERROR_RATE_THRESHOLD = float(os.environ.get("ERROR_RATE_THRESHOLD", "0.1"))  # 10% of logs
 ALERT_WINDOW_MINUTES = int(os.environ.get("ALERT_WINDOW_MINUTES", "15"))

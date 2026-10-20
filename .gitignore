@@ -1,6 +1,16 @@
 venv/
 __pycache__/
 *.pyc
-backend/telemetry.db
+.pytest_cache/
 .DS_Store
 *.log
+
+# Local databases
+*.db
+
+# Secrets and credentials (keep .env.example, which holds placeholders only)
+.env
+.env.*
+!.env.example
+*.pem
+*.key

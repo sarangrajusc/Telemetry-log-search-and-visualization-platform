@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime
+
+from redaction import redact, redact_value
 
 VALID_LEVELS = {"INFO", "WARN", "ERROR", "DEBUG"}
 
@@ -27,6 +29,15 @@ class LogEntry(BaseModel):
         if not v.strip():
             raise ValueError("must not be blank")
         return v
+
+
+    @model_validator(mode="after")
+    def scrub_secrets(self):
+        """Never store credentials that an application accidentally logged."""
+        self.message = redact(self.message)
+        if self.tags:
+            self.tags = redact_value(self.tags)
+        return self
 
 
 class LogBatch(BaseModel):
