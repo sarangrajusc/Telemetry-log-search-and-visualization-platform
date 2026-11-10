@@ -3,13 +3,14 @@ Generates synthetic telemetry logs and posts them to the ingest API in batches.
 Useful for populating the platform with realistic data to test search & charts.
 
 Usage:
-    python ingest_simulator.py --count 5000 --api http://localhost:8000
+    python ingest_simulator.py --count 5000 --api http://localhost:8000 [--api-key KEY]
 """
 import argparse
+import os
 import random
-import time
-from datetime import datetime, timedelta
-import requests
+from datetime import datetime, timedelta, timezone
+
+from ingest_client import IngestClient
 
 SOURCES = ["auth-service", "payments-api", "order-worker", "search-index", "gateway", "notifications"]
 LEVELS = ["INFO", "INFO", "INFO", "WARN", "ERROR", "DEBUG"]
@@ -47,29 +48,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=2000, help="Number of log entries to generate")
     parser.add_argument("--api", type=str, default="http://localhost:8000", help="Base API URL")
+    parser.add_argument("--api-key", default=os.environ.get("API_KEY"), help="API key (default: $API_KEY)")
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--hours-span", type=int, default=24, help="Spread logs over this many past hours")
     args = parser.parse_args()
 
-    base_time = datetime.utcnow() - timedelta(hours=args.hours_span)
+    client = IngestClient(args.api, api_key=args.api_key)
+    # Stored timestamps are naive UTC.
+    base_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=args.hours_span)
     total_seconds = args.hours_span * 3600
 
-    batch = []
     sent = 0
-    for i in range(args.count):
-        offset = random.randint(0, total_seconds)
-        batch.append(generate_log(base_time, offset))
-        if len(batch) >= args.batch_size:
-            resp = requests.post(f"{args.api}/api/logs/ingest/batch", json={"logs": batch})
-            resp.raise_for_status()
-            sent += len(batch)
-            print(f"Ingested {sent}/{args.count}")
-            batch = []
-
-    if batch:
-        resp = requests.post(f"{args.api}/api/logs/ingest/batch", json={"logs": batch})
-        resp.raise_for_status()
-        sent += len(batch)
+    for start in range(0, args.count, args.batch_size):
+        n = min(args.batch_size, args.count - start)
+        batch = [generate_log(base_time, random.randint(0, total_seconds)) for _ in range(n)]
+        sent += client.post_batch(batch)
         print(f"Ingested {sent}/{args.count}")
 
     print("Done.")

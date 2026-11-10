@@ -1,11 +1,11 @@
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import storage
 from database import get_conn
 
 
 def purge_old_logs(days: int) -> int:
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)).isoformat()
     backend = storage.get_backend()
     if hasattr(backend, "purge_older_than"):  # e.g. Elasticsearch delete_by_query
         return backend.purge_older_than(cutoff)

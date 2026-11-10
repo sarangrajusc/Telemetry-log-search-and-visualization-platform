@@ -17,7 +17,7 @@ import random
 import statistics
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 os.environ["TESTING"] = "1"
 
@@ -59,7 +59,7 @@ def run_benchmark(rows: int, seed: int = 7):
         "Worker picked up job {n}",
         "Rate limit exceeded for client 10.0.{m}.{k}",
     ]
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     print(f"Benchmarking with {rows:,} rows (backend: {storage.get_backend().__name__})")
 
@@ -89,7 +89,7 @@ def run_benchmark(rows: int, seed: int = 7):
     # --- Incident investigation: 24h window over the whole table ---
     window = 24 * 60
     q = "why is payments-api timeout failing?"
-    fixed_now = datetime.utcnow()
+    fixed_now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     seq = median_ms(lambda: investigate.investigate(q, window, parallel=False, use_cache=False, now=fixed_now), 5)
     par = median_ms(lambda: investigate.investigate(q, window, parallel=True, use_cache=False, now=fixed_now), 5)

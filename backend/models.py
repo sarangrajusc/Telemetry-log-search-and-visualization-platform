@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from redaction import redact, redact_value
 
@@ -14,6 +14,15 @@ class LogEntry(BaseModel):
     level: str = Field(..., description="INFO, WARN, ERROR, DEBUG")
     message: str = Field(..., min_length=1, max_length=10000)
     tags: Optional[dict] = Field(default_factory=dict, description="Arbitrary key/value metadata")
+
+    @field_validator("timestamp")
+    @classmethod
+    def normalize_timestamp(cls, v):
+        """Store naive UTC. Timezone-aware inputs (e.g. a trailing 'Z') are converted, so
+        every stored timestamp sorts and compares consistently as an ISO string."""
+        if v is not None and v.tzinfo is not None:
+            return v.astimezone(timezone.utc).replace(tzinfo=None)
+        return v
 
     @field_validator("level")
     @classmethod

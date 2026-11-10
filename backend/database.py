@@ -2,13 +2,26 @@ import sqlite3
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "telemetry.db"))
 
 
+def _ensure_db_dir():
+    """Create the database directory if needed and fail with a clear message if it isn't writable
+    (typically a mounted volume owned by another user when running as non-root in Docker)."""
+    directory = os.path.dirname(os.path.abspath(DB_PATH))
+    os.makedirs(directory, exist_ok=True)
+    if not os.access(directory, os.W_OK):
+        raise RuntimeError(
+            f"Database directory {directory!r} is not writable by uid {os.getuid()}. "
+            "Fix the volume permissions or point DB_PATH at a writable location."
+        )
+
+
 def init_db():
+    _ensure_db_dir()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -74,7 +87,7 @@ def get_conn():
 
 
 def insert_log(entry) -> int:
-    ts = entry.timestamp or datetime.utcnow()
+    ts = entry.timestamp or datetime.now(timezone.utc).replace(tzinfo=None)
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO logs (timestamp, source, host, level, message, tags) VALUES (?, ?, ?, ?, ?, ?)",
@@ -88,7 +101,7 @@ def insert_logs_batch(entries) -> int:
     with get_conn() as conn:
         rows = [
             (
-                (e.timestamp or datetime.utcnow()).isoformat(),
+                (e.timestamp or datetime.now(timezone.utc).replace(tzinfo=None)).isoformat(),
                 e.source, e.host, e.level.upper(), e.message, json.dumps(e.tags or {}),
             )
             for e in entries
@@ -199,7 +212,7 @@ def top_sources(limit: int = 10):
 def recent_level_counts(minutes: int = 15):
     """Counts per level within the last N minutes — used by the alerting check."""
     from datetime import timedelta
-    cutoff_iso = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    cutoff_iso = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes)).isoformat()
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT level, COUNT(*) as count FROM logs WHERE timestamp >= ? GROUP BY level",

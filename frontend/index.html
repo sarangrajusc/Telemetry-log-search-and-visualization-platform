@@ -3,7 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <title>Telemetry Log Search & Visualization</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"
+        integrity="sha384-G436+Z2nlA8+PNoeRvWdxKbvOf8E/y+lYxqht2iBwNHTQDV5CJr3+AGVj8fGZi5t"
+        crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #0f1117; --panel: #171a23; --border: #262a36;
@@ -34,15 +36,40 @@
   .level.DEBUG { background: rgba(125,133,151,.15); color: var(--debug); }
   .results-panel { grid-column: 1 / -1; max-height: 420px; overflow: auto; }
   .meta { color: var(--muted); font-size: 12px; padding: 0 28px 8px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+  .keybox { display:flex; gap:6px; align-items:center; }
+  .keybox input { background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 12px; width: 190px; }
+  .keybox button, .inv button { background: transparent; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  #banner { margin: 12px 28px 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; display:none; }
+  #banner.alert { display:block; background: rgba(239,91,91,.12); border:1px solid var(--error); color: var(--error); }
+  #banner.warn { display:block; background: rgba(234,181,78,.12); border:1px solid var(--warn); color: var(--warn); }
+  .inv-panel { grid-column: 1 / -1; }
+  .inv { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .inv input[type=text] { flex:1; min-width:220px; background: var(--bg); border:1px solid var(--border);
+    color: var(--text); padding:8px 10px; border-radius:6px; font-size:13px; }
+  .inv select { background: var(--bg); border:1px solid var(--border); color: var(--text); padding:8px; border-radius:6px; font-size:13px; }
+  .inv button.primary { background: var(--accent); border-color: var(--accent); color:#fff; padding:8px 16px; font-size:13px; }
+  #invOut { font-size: 13px; }
+  #invOut .stat { color: var(--muted); margin-bottom: 8px; }
+  #invOut code { color: var(--muted); }
   .charts-row { grid-column: 1 / -1; display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
 </style>
 </head>
 <body>
 
 <header>
+  <div>
   <h1>Telemetry Log Search & Visualization Platform</h1>
   <p>Search across ingested logs and monitor volume, error rate, and source breakdown.</p>
+  </div>
+  <div class="keybox">
+    <input type="password" id="apiKey" placeholder="API key (if required)" autocomplete="off">
+    <button onclick="saveKey()">Use key</button>
+  </div>
 </header>
+<div id="banner" role="status"></div>
 
 <div class="filters">
   <input type="text" id="q" placeholder="Search message text (e.g. timeout, failed)">
@@ -51,7 +78,7 @@
     <option>INFO</option><option>WARN</option><option>ERROR</option><option>DEBUG</option>
   </select>
   <input type="text" id="source" placeholder="Source (e.g. auth-service)">
-  <button onclick="runSearch(); refreshStats();">Search</button>
+  <button onclick="loadAll()">Search</button>
 </div>
 
 <div class="layout">
@@ -70,6 +97,19 @@
     </div>
   </div>
 
+  <div class="panel inv-panel">
+    <h2>Incident Investigation</h2>
+    <div class="inv">
+      <input type="text" id="invQ" placeholder="Ask, e.g. why is payments-api failing?">
+      <select id="invWin">
+        <option value="15">Last 15 min</option><option value="60" selected>Last hour</option>
+        <option value="360">Last 6 hours</option><option value="1440">Last 24 hours</option>
+      </select>
+      <button class="primary" onclick="runInvestigate()">Investigate</button>
+    </div>
+    <div id="invOut"><span class="stat">Collects error patterns, affected sources and a timeline from the logs, with log-id citations.</span></div>
+  </div>
+
   <div class="panel results-panel">
     <h2>Results</h2>
     <div class="meta" id="resultMeta">No search run yet.</div>
@@ -86,6 +126,78 @@ const API = ""; // same origin, since FastAPI serves this file
 let volumeChart, levelChart, sourceChart;
 const LEVEL_COLORS = { ERROR: "#ef5b5b", WARN: "#eab54e", INFO: "#5b8cff", DEBUG: "#7d8597" };
 
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let apiKey = "";
+try { apiKey = sessionStorage.getItem("telemetry_api_key") || ""; } catch {}
+document.getElementById("apiKey").value = apiKey;
+
+function saveKey() {
+  apiKey = document.getElementById("apiKey").value.trim();
+  try { sessionStorage.setItem("telemetry_api_key", apiKey); } catch {}
+  loadAll();
+}
+
+class AuthRequired extends Error {}
+
+async function api(path) {
+  const res = await fetch(`${API}${path}`, apiKey ? { headers: { "X-API-Key": apiKey } } : {});
+  if (res.status === 401 || res.status === 403) throw new AuthRequired();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function setBanner(kind, text) {
+  const b = document.getElementById("banner");
+  b.className = kind || "";
+  b.textContent = text || "";
+}
+
+function showError(e) {
+  if (e instanceof AuthRequired) setBanner("warn", "This server requires an API key. Enter it at the top right.");
+  else setBanner("warn", `Request failed: ${e.message}`);
+}
+
+async function checkAlerts() {
+  const a = await api("/api/alerts/check");
+  if (a.triggered) {
+    setBanner("alert", `Error rate ${(a.error_rate * 100).toFixed(1)}% (${a.error_count}/${a.total_logs} logs) ` +
+      `over the last ${a.window_minutes} min, threshold ${(a.threshold * 100).toFixed(0)}%.`);
+  } else {
+    setBanner("", "");
+  }
+}
+
+async function runInvestigate() {
+  const out = document.getElementById("invOut");
+  const params = new URLSearchParams({
+    q: document.getElementById("invQ").value.trim(),
+    window_minutes: document.getElementById("invWin").value,
+  });
+  out.textContent = "Investigating...";
+  try {
+    const ev = await api(`/api/investigate?${params}`);
+    const pats = ev.top_error_patterns.map(p =>
+      `<tr><td>${esc(p.count)}</td><td>${esc(p.pattern)}</td><td>${esc(Object.keys(p.sources || {}).join(", "))}</td>` +
+      `<td><code>log:${esc(p.example.id)}</code></td></tr>`).join("");
+    const src = Object.entries(ev.affected_sources).map(([k, v]) => `${esc(k)} (${esc(v)})`).join(", ");
+    const gaps = Object.keys(ev.partial_failures || {}).length
+      ? `<div class="stat">Evidence gaps: ${esc(Object.keys(ev.partial_failures).join(", "))}</div>` : "";
+    out.innerHTML =
+      `<div class="stat">${esc(ev.total_logs_in_window)} logs in window, error rate ` +
+      `${(ev.error_rate * 100).toFixed(1)}%, ${esc(ev.elapsed_ms)} ms</div>` +
+      (src ? `<div class="stat">Most affected sources: ${src}</div>` : "") + gaps +
+      (pats ? `<table><thead><tr><th>Count</th><th>Error pattern</th><th>Sources</th><th>Cite</th></tr></thead><tbody>${pats}</tbody></table>`
+            : `<div class="stat">No errors in this window.</div>`);
+  } catch (e) {
+    out.textContent = "";
+    showError(e);
+  }
+}
+
 function fmtTs(ts) {
   try { return new Date(ts).toLocaleString(); } catch { return ts; }
 }
@@ -101,8 +213,7 @@ async function runSearch() {
   if (source) params.set("source", source);
   params.set("page_size", "100");
 
-  const res = await fetch(`${API}/api/logs/search?${params.toString()}`);
-  const data = await res.json();
+  const data = await api(`/api/logs/search?${params.toString()}`);
 
   document.getElementById("resultMeta").textContent = `${data.total} results`;
   const body = document.getElementById("resultsBody");
@@ -110,20 +221,20 @@ async function runSearch() {
   for (const row of data.results) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${fmtTs(row.timestamp)}</td>
-      <td><span class="level ${row.level}">${row.level}</span></td>
-      <td>${row.source}</td>
-      <td>${row.host || ""}</td>
-      <td>${row.message}</td>`;
+      <td>${esc(fmtTs(row.timestamp))}</td>
+      <td><span class="level ${esc(row.level)}">${esc(row.level)}</span></td>
+      <td>${esc(row.source)}</td>
+      <td>${esc(row.host)}</td>
+      <td>${esc(row.message)}</td>`;
     body.appendChild(tr);
   }
 }
 
 async function refreshStats() {
   const [volume, levels, sources] = await Promise.all([
-    fetch(`${API}/api/stats/volume?bucket=hour`).then(r => r.json()),
-    fetch(`${API}/api/stats/levels`).then(r => r.json()),
-    fetch(`${API}/api/stats/sources?limit=8`).then(r => r.json()),
+    api("/api/stats/volume?bucket=hour"),
+    api("/api/stats/levels"),
+    api("/api/stats/sources?limit=8"),
   ]);
 
   const vLabels = volume.map(v => v.bucket);
@@ -132,7 +243,7 @@ async function refreshStats() {
   volumeChart = new Chart(document.getElementById("volumeChart"), {
     type: "line",
     data: { labels: vLabels, datasets: [{ label: "Logs", data: vData, borderColor: "#5b8cff",
-      backgroundColor: "rgba(91,140,255,.15)", fill: true, tension: 0.3, pointRadius: 0 }] },
+      backgroundColor: "rgba(91,140,255,.15)", fill: true, tension: 0.3, pointRadius: 2 }] },
     options: { plugins: { legend: { display: false } },
       scales: { x: { ticks: { color: "#8b93a7", maxTicksLimit: 8 }, grid: { color: "#262a36" } },
                 y: { ticks: { color: "#8b93a7" }, grid: { color: "#262a36" } } } }
@@ -160,8 +271,17 @@ async function refreshStats() {
   });
 }
 
-runSearch();
-refreshStats();
+async function loadAll() {
+  setBanner("", "");
+  try {
+    await Promise.all([runSearch(), refreshStats(), checkAlerts()]);
+  } catch (e) { showError(e); }
+}
+
+document.getElementById("invQ").addEventListener("keydown", e => { if (e.key === "Enter") runInvestigate(); });
+document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") loadAll(); });
+loadAll();
+setInterval(() => checkAlerts().catch(() => {}), 60000);
 </script>
 </body>
 </html>

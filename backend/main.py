@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +13,13 @@ from retention import purge_old_logs
 from alerting import check_error_rate
 from investigate import investigate
 
-app = FastAPI(title="Telemetry Log Search & Visualization Platform")
+@asynccontextmanager
+async def lifespan(_app):
+    storage.init_db()
+    yield
+
+
+app = FastAPI(title="Telemetry Log Search & Visualization Platform", lifespan=lifespan)
 
 # CORS is off unless origins are listed explicitly (the bundled dashboard is same-origin,
 # so it doesn't need it). Example: CORS_ORIGINS=https://dash.example.com,http://localhost:3000
@@ -27,11 +34,6 @@ if _origins:
 
 reads = [Depends(require_read_access)]
 writes = [Depends(require_api_key), Depends(rate_limit)]
-
-
-@app.on_event("startup")
-def startup():
-    storage.init_db()
 
 
 @app.post("/api/logs/ingest", dependencies=writes)

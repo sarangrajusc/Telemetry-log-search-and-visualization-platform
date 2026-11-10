@@ -1,0 +1,24 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec). UNTESTED: written from the
+# documented schema but not deployed from this repo yet; see DEPLOY.md for what to check.
+#
+# A persistent disk is required to keep the SQLite database between deploys, and Render only
+# offers disks on paid plans. On the free plan, drop the `disk:` block and treat data as ephemeral.
+services:
+  - type: web
+    name: telemetry-platform
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: API_KEY
+        generateValue: true        # Render generates a random secret; read it in the dashboard
+      - key: PROTECT_READS
+        value: "1"                 # the dashboard then asks for the key (see DEPLOY.md)
+      - key: DB_PATH
+        value: /data/telemetry.db
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"                 # safe here ONLY because traffic arrives via Render's proxy
+    disk:
+      name: telemetry-data
+      mountPath: /data
+      sizeGB: 1

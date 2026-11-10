@@ -24,10 +24,12 @@ Built on FastAPI with pluggable storage (SQLite FTS5 or Elasticsearch).
   thread-safe TTL/LRU cache
 - **Security**: secret redaction on ingest, constant-time API key checks, optional
   read protection, CORS off by default, rate limiting, hardened GitHub Actions
-- **Live dashboard**: volume over time, level breakdown, top sources (Chart.js)
-- **Ingestion paths**: REST, a file-tailing agent, and a synthetic generator
+- **Live dashboard**: volume, level breakdown, top sources, error-rate alert banner and an
+  incident-investigation panel (Chart.js with SRI). Takes the API key in the page, escapes all log text.
+- **Ingestion paths**: REST, a resilient file-tailing agent (retry/backoff, buffering, rotation
+  and truncation handling), and a synthetic generator; all send the API key
 - **Error-rate alerting**, **retention job**, **Docker** support
-- **58 automated tests** (pytest), run in CI on every push/PR
+- **82 automated tests** (pytest), run in CI on every push/PR
 
 ## Architecture
 
@@ -208,8 +210,13 @@ The warm-cache figure still includes clustering the cached samples and assemblin
 ## Real ingestion (file tailing)
 
 ```bash
-python file_tailer.py --file /path/to/app.log --api http://localhost:8000
+python file_tailer.py --file /path/to/app.log --api http://localhost:8000 --api-key "$API_KEY"
 ```
+
+The tailer starts at the end of the file (use `--from-start` to backfill), waits for half-written
+lines, follows log rotation and truncation, retries with exponential backoff (honouring
+`Retry-After`), keeps lines buffered in order during an outage (`--max-buffer`, oldest dropped and
+counted on overflow), isolates single rejected lines, and exits with code 2 on a bad API key.
 
 ## Retention and alerting
 
@@ -223,8 +230,12 @@ python retention.py --days 30       # or POST /api/admin/retention?days=30 (API 
 ## Docker
 
 ```bash
-docker compose up --build
+docker compose up --build                          # SQLite, data kept in a named volume
+docker compose --profile elasticsearch up --build  # also start Elasticsearch
 ```
+
+The image runs as a non-root user and has a healthcheck. See [DEPLOY.md](DEPLOY.md) for
+environment settings and hosting notes (the Render blueprint there is untested).
 
 ## Next steps
 
@@ -232,7 +243,7 @@ docker compose up --build
    `benchmark.py`.
 2. Add embedding-based (vector) retrieval alongside keyword search for semantic matching.
 3. Move rate limiting to a shared store (Redis) before running multiple workers.
-4. Deploy to a public host for a live demo.
+4. Run the Docker image and Render blueprint on a real host and record what needs adjusting.
 
 ## License
 

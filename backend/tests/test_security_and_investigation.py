@@ -7,7 +7,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,7 +38,7 @@ def client():
 
 
 def add(level="INFO", source="svc", message="hello", minutes_ago=0, **kw):
-    ts = datetime.utcnow() - timedelta(minutes=minutes_ago)
+    ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes_ago)
     e = LogEntry(source=source, level=level, message=message, timestamp=ts, **kw)
     database.insert_log(e)
 
@@ -247,7 +247,7 @@ def test_investigation_finds_dominant_pattern_and_source():
 
 def test_parallel_and_sequential_results_are_identical():
     seed_incident()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     par = investigate.investigate("timeout", 60, parallel=True, now=now, use_cache=False)
     seq = investigate.investigate("timeout", 60, parallel=False, now=now, use_cache=False)
     assert strip_volatile(par) == strip_volatile(seq)
@@ -255,7 +255,7 @@ def test_parallel_and_sequential_results_are_identical():
 
 def test_repeat_investigations_are_served_from_cache():
     seed_incident()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     investigate.investigate("timeout", 60, now=now)
     before = cache_mod.query_cache.stats()
     investigate.investigate("timeout", 60, now=now)

@@ -1,4 +1,10 @@
-version: "3.9"
+# Local / single-host deployment.
+#
+#   docker compose up --build                          # API + dashboard on SQLite
+#   docker compose --profile elasticsearch up --build  # also start Elasticsearch
+#       (then set STORAGE_BACKEND=elasticsearch for the API; see DEPLOY.md)
+#
+# Settings come from your shell or a .env file next to this file (copy .env.example).
 
 services:
   telemetry-api:
@@ -6,11 +12,38 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - API_KEY=${API_KEY:-}
-      - RATE_LIMIT_REQUESTS=100
-      - RATE_LIMIT_WINDOW_SECONDS=60
+      API_KEY: ${API_KEY:-}
+      PROTECT_READS: ${PROTECT_READS:-0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-100}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-sqlite}
+      ES_URL: ${ES_URL:-http://elasticsearch:9200}
+      DB_PATH: /data/telemetry.db        # lives on the named volume below, so data survives restarts
     volumes:
-      - telemetry-data:/app/backend/data
+      - telemetry-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Optional. Single-node dev instance with security disabled: do NOT expose it publicly.
+  elasticsearch:
+    profiles: ["elasticsearch"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:9200:9200"            # bound to localhost only
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
 
 volumes:
   telemetry-data:
+  es-data:
